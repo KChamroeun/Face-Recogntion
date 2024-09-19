@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 camera = None
 detected_student = None
 
+# Initialize SQLite database if needed
 def initialize_database():
     conn = sqlite3.connect("sqlite.db")
     conn.execute("""
@@ -28,20 +29,23 @@ def initialize_database():
 
 initialize_database()
 
+# Class to manage video capture and face recognition
 class VideoCamera:
     def __init__(self):
-        self.video = cv2.VideoCapture(0)
+        self.video = cv2.VideoCapture(0)  # Open the camera
         if not self.video.isOpened():
             logger.error("Failed to open camera")
         self.facedetect = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        
+        # Load pre-trained recognizer model
         self.recognizer = cv2.face.LBPHFaceRecognizer_create()
         try:
-            self.recognizer.read('trainer.yml')
+            self.recognizer.read('trainer.yml')  # Change path if necessary
         except cv2.error as e:
             logger.error(f"Error loading recognizer: {e}")
         
     def __del__(self):
-        self.video.release()
+        self.video.release()  # Release the video capture resource when done
     
     def get_frame(self):
         success, img = self.video.read()
@@ -50,18 +54,22 @@ class VideoCamera:
             return None
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = self.facedetect.detectMultiScale(gray, 1.3, 5) 
+        faces = self.facedetect.detectMultiScale(gray, 1.3, 5)
 
         for (x, y, w, h) in faces:
             cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
             id, conf = self.recognizer.predict(gray[y:y + h, x:x + w])
-            profile = self.getprofile(id)
             
-            if profile:
-                global detected_student
-                detected_student = profile
-                text = f"ID: {profile[0]} - Name: {profile[1]} {profile[2]}"
-                cv2.putText(img, text, (x, y + h + 20), cv2.FONT_HERSHEY_COMPLEX, 0.6, (255, 255, 255), 2)
+            # Confidence threshold to filter out unknown faces
+            if conf < 100:  # Adjust the threshold as needed
+                profile = self.getprofile(id)
+                if profile:
+                    global detected_student
+                    detected_student = profile
+                    text = f"ID: {profile[0]} - Name: {profile[1]} {profile[2]}"
+                    cv2.putText(img, text, (x, y + h + 20), cv2.FONT_HERSHEY_COMPLEX, 0.6, (255, 255, 255), 2)
+            else:
+                cv2.putText(img, "Unknown", (x, y + h + 20), cv2.FONT_HERSHEY_COMPLEX, 0.6, (255, 0, 0), 2)
 
         ret, jpeg = cv2.imencode('.jpg', img)
         if not ret:
@@ -76,24 +84,30 @@ class VideoCamera:
             conn = sqlite3.connect("sqlite.db")
             cursor = conn.execute("SELECT * FROM STUDENTS WHERE id=?", (id,))
             profile = cursor.fetchone()
-            return profile
+            if profile:
+                # Construct the image path based on the student's ID
+                image_path = f'img/{id}.jpg'
+                return profile + (image_path,)  # Add the image path to the profile data
+            return None
         finally:
-            conn.close()
-
+            conn.close()  
+# Function to generate video frames for the camera feed
 def gen(camera):
     while True:
         frame = camera.get_frame()
         if frame is None:
             continue
         yield (b'--frame\r\n'
-            b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
 
+# View to handle video streaming
 def video_feed(request):
     global camera
     if camera is None:
         camera = VideoCamera()
     return StreamingHttpResponse(gen(camera), content_type='multipart/x-mixed-replace; boundary=frame')
 
+# View to stop the camera feed
 def stop_camera(request):
     global camera
     if camera is not None:
@@ -101,10 +115,36 @@ def stop_camera(request):
         camera = None
     return redirect('index')
 
+# View to display the index page with students data
 def index(request):
     global detected_student
-    return render(request, 'detection/index.html', {'detected_student': detected_student})
+    # Fetch students from SQLite database
+    conn = sqlite3.connect("sqlite.db")
+    cursor = conn.execute("SELECT id, FirstName, LastName, Gender, MedicalCondition, Address, EmergencyContact FROM STUDENTS")
+    sqlite_students = cursor.fetchall()
+    conn.close()
 
+    # Fetch students from Django's database
+    django_students = Student.objects.all().values_list('id', 'FirstName', 'LastName', 'Gender', 'MedicalCondition', 'Address', 'EmergencyContact')
+
+    # Combine both lists
+    combined_students = list(sqlite_students) + list(django_students)
+
+    # Remove duplicates (based on unique ID)
+    unique_students = {student[0]: student for student in combined_students}
+    combined_students = list(unique_students.values())
+
+    context = {
+        'detected_student': detected_student,
+        'students': combined_students,
+    }
+
+    if detected_student:
+        context['image_path'] = detected_student[-1]  # Pass the image path from the detected student
+
+    return render(request, 'detection/index.html', context)
+
+# API view to return the detected student info as JSON
 def detected_student_info(request):
     global detected_student
     if detected_student:
@@ -119,6 +159,7 @@ def detected_student_info(request):
         })
     return JsonResponse({'Error': 'No student detected'}, status=404)
 
+# View to handle student training (adding new student info)
 @csrf_exempt
 def train(request):
     if request.method == 'POST':
@@ -150,28 +191,6 @@ def train(request):
         conn.commit()
         conn.close()
 
-        return redirect('home')  # Redirect to home (index) page after submission
+        return redirect('index')  # Redirect to home (index) page after submission
 
-    return render(request, 'detection/train.html')
-
-def student_list(request):
-    # Fetch students from SQLite database
-    conn = sqlite3.connect("sqlite.db")
-    cursor = conn.execute("SELECT id, FirstName, LastName, Gender, MedicalCondition, Address, EmergencyContact FROM STUDENTS")
-    sqlite_students = cursor.fetchall()
-    conn.close()
-
-    # Fetch students from Django's database
-    django_students = Student.objects.all().values_list('id', 'FirstName', 'LastName', 'Gender', 'MedicalCondition', 'Address', 'EmergencyContact')
-
-    # Combine both lists
-    combined_students = list(sqlite_students) + list(django_students)
-
-    # Remove duplicates (based on unique ID)
-    unique_students = {student[0]: student for student in combined_students}
-    combined_students = list(unique_students.values())
-
-    return render(request, 'detection/list.html', {'students': combined_students})
-
-def main_page(request):
-    return render(request, 'detection/main.html')
+    return render(request, 'detection/index.html')
