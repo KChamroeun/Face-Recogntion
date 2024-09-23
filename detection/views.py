@@ -13,7 +13,7 @@ detected_student = None
 
 # Initialize SQLite database if needed
 def initialize_database():
-    conn = sqlite3.connect("sqlite.db")
+    conn = sqlite3.connect("new_students.db")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS STUDENTS (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +81,7 @@ class VideoCamera:
     @staticmethod
     def getprofile(id):
         try:
-            conn = sqlite3.connect("sqlite.db")
+            conn = sqlite3.connect("new_students.db")
             cursor = conn.execute("SELECT * FROM STUDENTS WHERE id=?", (id,))
             profile = cursor.fetchone()
             if profile:
@@ -91,6 +91,7 @@ class VideoCamera:
             return None
         finally:
             conn.close()  
+            
 # Function to generate video frames for the camera feed
 def gen(camera):
     while True:
@@ -119,7 +120,7 @@ def stop_camera(request):
 def index(request):
     global detected_student
     # Fetch students from SQLite database
-    conn = sqlite3.connect("sqlite.db")
+    conn = sqlite3.connect("new_students.db")
     cursor = conn.execute("SELECT id, FirstName, LastName, Gender, MedicalCondition, Address, EmergencyContact FROM STUDENTS")
     sqlite_students = cursor.fetchall()
     conn.close()
@@ -182,7 +183,7 @@ def train(request):
         student.save()
 
         # Save to SQLite database
-        conn = sqlite3.connect("sqlite.db")
+        conn = sqlite3.connect("train.db")
         cursor = conn.cursor()
         cursor.execute("""
         INSERT INTO STUDENTS (FirstName, LastName, Gender, MedicalCondition, Address, EmergencyContact) 
@@ -194,3 +195,20 @@ def train(request):
         return redirect('index')  # Redirect to home (index) page after submission
 
     return render(request, 'detection/index.html')
+
+
+def student_details(request, student_id):
+    try:
+        student = Student.objects.get(pk=student_id)
+        response_data = {
+            'id': student.id,
+            'first_name': student.FirstName,
+            'last_name': student.LastName,
+            'gender': student.Gender,
+            'medical_condition': student.MedicalCondition,
+            'address': student.Address,
+            'emergency_contact': student.EmergencyContact
+        }
+        return JsonResponse(response_data)
+    except Student.DoesNotExist:
+        return JsonResponse({'Error': 'Student not found'}, status=404)
